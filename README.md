@@ -32,6 +32,17 @@
 
 This is a docker implementation of a Water Linked DVL A50 and A125 driver as a BlueOS Extension.
 
+## PX4
+
+Select `ODOMETRY` as the message type when using PX4. This sends DVL velocity in
+the vehicle body FRD frame using MAVLink `ODOMETRY`; pose and angular velocity
+are left unavailable. Configure PX4 with `EKF2_EV_CTRL=4` to fuse external-vision
+3D velocity without enabling external-vision position or height fusion.
+
+The legacy `SPEED_ESTIMATE` option is retained for ArduPilot. Do not use it for
+PX4: `VISION_SPEED_ESTIMATE` has no field that can identify the DVL velocity as
+body-frame data.
+
 ## Install
 
 Install it from [BlueOS extensions tab](https://docs.bluerobotics.com/ardusub-zola/software/onboard/BlueOS-1.1/extensions/).

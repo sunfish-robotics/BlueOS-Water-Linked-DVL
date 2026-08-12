@@ -77,6 +77,62 @@ class Mavlink2RestHelper:
       0.0
     ],
     "reset_counter": 0
+}}
+}}"""
+
+        # The DVL velocity is expressed in the vehicle body frame. ODOMETRY is
+        # used for PX4 because, unlike VISION_SPEED_ESTIMATE, it can declare the
+        # velocity frame explicitly. Pose and angular velocity are not measured
+        # by the DVL, so they are marked unavailable with NaN values.
+        self.odometry_template = """
+{{
+  "header": {{
+    "system_id": 255,
+    "component_id": 0,
+    "sequence": 0
+  }},
+  "message": {{
+    "type": "ODOMETRY",
+    "time_usec": {us},
+    "frame_id": {{
+      "type": "MAV_FRAME_LOCAL_NED"
+    }},
+    "child_frame_id": {{
+      "type": "MAV_FRAME_BODY_FRD"
+    }},
+    "x": NaN,
+    "y": NaN,
+    "z": NaN,
+    "q": [NaN, NaN, NaN, NaN],
+    "vx": {vx},
+    "vy": {vy},
+    "vz": {vz},
+    "rollspeed": NaN,
+    "pitchspeed": NaN,
+    "yawspeed": NaN,
+    "pose_covariance": [
+      NaN,
+      0.0, 0.0, 0.0, 0.0, 0.0,
+      0.0, 0.0, 0.0, 0.0, 0.0,
+      0.0, 0.0, 0.0, 0.0,
+      0.0, 0.0, 0.0,
+      0.0, 0.0,
+      0.0
+    ],
+    "velocity_covariance": [
+      {velocity_variance},
+      0.0, 0.0, 0.0, 0.0, 0.0,
+      {velocity_variance}, 0.0, 0.0, 0.0, 0.0,
+      {velocity_variance}, 0.0, 0.0, 0.0,
+      0.0, 0.0, 0.0,
+      0.0, 0.0,
+      0.0
+    ],
+    "reset_counter": 0,
+    "estimator_type": {{
+      "type": "MAV_ESTIMATOR_TYPE_UNKNOWN"
+    }},
+    "quality": {quality}
   }}
 }}"""
 
@@ -332,6 +388,20 @@ class Mavlink2RestHelper:
             vx=speed_estimates[0],
             vy=speed_estimates[1],
             vz=speed_estimates[2],
+        )
+
+        post(MAVLINK2REST_URL + "/mavlink", data=data)
+
+    def send_odometry(self, speed_estimates, velocity_stddev, quality):
+        """Send body-FRD DVL velocity to PX4 in an ODOMETRY message."""
+        velocity_variance = velocity_stddev**2
+        data = self.odometry_template.format(
+            us=int((time.time() - self.start_time) * 1e6),
+            vx=speed_estimates[0],
+            vy=speed_estimates[1],
+            vz=speed_estimates[2],
+            velocity_variance=velocity_variance,
+            quality=max(1, min(100, int(round(quality)))),
         )
 
         post(MAVLINK2REST_URL + "/mavlink", data=data)

@@ -1,5 +1,5 @@
 """
-Code for integration of Water Linked DVL A50/A125 with BlueOS and ArduSub
+Code for integration of Water Linked DVL A50/A125 with BlueOS, ArduSub, and PX4
 """
 
 import json
@@ -28,6 +28,7 @@ class MessageType(str, Enum):
     POSITION_DELTA = "POSITION_DELTA"
     POSITION_ESTIMATE = "POSITION_ESTIMATE"
     SPEED_ESTIMATE = "SPEED_ESTIMATE"
+    ODOMETRY = "ODOMETRY"
 
     @staticmethod
     def contains(value):
@@ -41,7 +42,7 @@ class MessageType(str, Enum):
 class DvlDriver(threading.Thread):
     """
     Responsible for the DVL interactions themselves.
-    This handles fetching the DVL data and forwarding it to Ardusub
+    This handles fetching the DVL data and forwarding it to the flight controller.
     """
 
     status = "Starting"
@@ -398,6 +399,9 @@ class DvlDriver(threading.Thread):
         elif self.should_send == MessageType.SPEED_ESTIMATE:
             velocity = [vx, vy, vz] if self.orientation == DVL_DOWN else [vz, vy, -vx]  # DVL_FORWARD
             self.mav.send_vision_speed_estimate(velocity)
+        elif self.should_send == MessageType.ODOMETRY:
+            velocity = [vx, vy, vz] if self.orientation == DVL_DOWN else [vz, vy, -vx]  # DVL_FORWARD
+            self.mav.send_odometry(velocity, velocity_stddev=fom, quality=confidence)
 
         self.last_attitude = self.current_attitude
 

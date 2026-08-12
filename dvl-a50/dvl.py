@@ -22,6 +22,7 @@ HOSTNAME = "waterlinked-dvl.local"
 DVL_DOWN = 1
 DVL_FORWARD = 2
 LATLON_TO_CM = 1.1131884502145034e5
+SETTINGS_VERSION = 2
 
 
 class MessageType(str, Enum):
@@ -63,10 +64,12 @@ class DvlDriver(threading.Thread):
         "origin",
         "rangefinder",
         "should_send",
+        "settings_version",
     ]
     settings_path = os.path.join(os.path.expanduser("~"), ".config", "dvl", "settings.json")
 
-    should_send = MessageType.POSITION_DELTA
+    should_send = MessageType.ODOMETRY
+    settings_version = SETTINGS_VERSION
     reset_counter = 0
     timestamp = 0
     last_temperature_check_time = 0
@@ -91,12 +94,20 @@ class DvlDriver(threading.Thread):
         try:
             with open(self.settings_path) as settings:
                 data = json.load(settings)
+                stored_settings_version = data.get("settings_version", 1)
                 for setting_name in self.saved_settings:
                     if setting_name in data:
                         setattr(self, setting_name, data[setting_name])
                     else:
                         default = getattr(self, setting_name)
                         logger.warning(f"key not found: {setting_name} - keeping {default=} instead:")
+
+                if stored_settings_version < SETTINGS_VERSION:
+                    if self.should_send == MessageType.POSITION_DELTA:
+                        logger.info("Migrating the default MAVLink message type to ODOMETRY.")
+                        self.should_send = MessageType.ODOMETRY
+                    self.settings_version = SETTINGS_VERSION
+                    self.save_settings()
                 logger.debug("Loaded settings: ", data)
         except FileNotFoundError:
             logger.warning("Settings file not found, using default.")

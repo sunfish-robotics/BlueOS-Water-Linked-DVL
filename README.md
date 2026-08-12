@@ -33,9 +33,8 @@
 This is a docker implementation of a Water Linked DVL A50 and A125 driver as a BlueOS Extension.
 
 The extension publishes valid DVL velocity samples as MAVLink `ODOMETRY` by
-default. Installations upgrading from the former implicit `POSITION_DELTA`
-default are migrated automatically while explicit alternative selections are
-preserved.
+default. Existing installations can override this through their persisted
+settings.
 
 ## PX4
 

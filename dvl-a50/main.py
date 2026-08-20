@@ -40,6 +40,7 @@ class API:
         Sets the DVL mounting orientation:
         1 = Down
         2 = Forward
+        3 = Down, rotated 180 degrees about vehicle Z
         """
         return self.dvl.set_orientation(orientation)
 

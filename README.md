@@ -43,6 +43,10 @@ the vehicle body FRD frame using MAVLink `ODOMETRY`; pose and angular velocity
 are left unavailable. Configure PX4 with `EKF2_EV_CTRL=4` to fuse external-vision
 3D velocity without enabling external-vision position or height fusion.
 
+For a down-facing DVL whose reported forward and right velocities are both
+reversed, select mounting orientation `3` (down, rotated 180 degrees about the
+vehicle Z axis). This applies `[-vx, -vy, vz]` before publishing BODY_FRD.
+
 The legacy `SPEED_ESTIMATE` option is retained for ArduPilot. Do not use it for
 PX4: `VISION_SPEED_ESTIMATE` has no field that can identify the DVL velocity as
 body-frame data.

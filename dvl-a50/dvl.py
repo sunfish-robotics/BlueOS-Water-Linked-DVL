@@ -21,6 +21,7 @@ from mavlink2resthelper import GPS_GLOBAL_ORIGIN_ID, Mavlink2RestHelper
 HOSTNAME = "waterlinked-dvl.local"
 DVL_DOWN = 1
 DVL_FORWARD = 2
+DVL_DOWN_REVERSED = 3
 LATLON_TO_CM = 1.1131884502145034e5
 
 
@@ -177,13 +178,24 @@ class DvlDriver(threading.Thread):
 
     def set_orientation(self, orientation: int) -> bool:
         """
-        Sets the DVL orientation, either DVL_FORWARD of DVL_DOWN
+        Sets the DVL mounting orientation.
         """
-        if orientation in [DVL_FORWARD, DVL_DOWN]:
+        if orientation in [DVL_DOWN, DVL_FORWARD, DVL_DOWN_REVERSED]:
             self.orientation = orientation
             self.save_settings()
             return True
         return False
+
+    def transform_velocity(self, vx: float, vy: float, vz: float) -> List[float]:
+        """Transform a DVL velocity into the vehicle BODY_FRD frame."""
+        if self.orientation == DVL_DOWN:
+            return [vx, vy, vz]
+
+        if self.orientation == DVL_DOWN_REVERSED:
+            # A downward-facing DVL rotated 180 degrees about vehicle Z.
+            return [-vx, -vy, vz]
+
+        return [vz, vy, -vx]  # DVL_FORWARD
 
     def set_should_send(self, should_send):
         if not MessageType.contains(should_send):
@@ -392,15 +404,20 @@ class DvlDriver(threading.Thread):
             if self.orientation == DVL_DOWN:
                 position_delta = [dx, dy, dz]
                 attitude_delta = [dRoll, dPitch, dYaw]
+
+            elif self.orientation == DVL_DOWN_REVERSED:
+                position_delta = [-dx, -dy, dz]
+                attitude_delta = [dRoll, dPitch, dYaw]
+
             elif self.orientation == DVL_FORWARD:
                 position_delta = [dz, dy, -dx]
                 attitude_delta = [dYaw, dPitch, -dRoll]
             self.mav.send_vision(position_delta, attitude_delta, dt=data["time"] * 1e3, confidence=confidence)
         elif self.should_send == MessageType.SPEED_ESTIMATE:
-            velocity = [vx, vy, vz] if self.orientation == DVL_DOWN else [vz, vy, -vx]  # DVL_FORWARD
+            velocity = self.transform_velocity(vx, vy, vz)
             self.mav.send_vision_speed_estimate(velocity)
         elif self.should_send == MessageType.ODOMETRY:
-            velocity = [vx, vy, vz] if self.orientation == DVL_DOWN else [vz, vy, -vx]  # DVL_FORWARD
+            velocity = self.transform_velocity(vx, vy, vz)
             self.mav.send_odometry(velocity, velocity_stddev=fom, quality=confidence)
 
         self.last_attitude = self.current_attitude

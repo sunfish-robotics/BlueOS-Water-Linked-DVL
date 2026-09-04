@@ -25,6 +25,7 @@ class Mavlink2RestHelper:
         # store vehicle and component to access telemetry data from
         self.vehicle = vehicle
         self.component = component
+        self.sequence = 0
         # store vision template data so we don't need to fetch it multiple times
         self.start_time = time.time()
         self.vision_template = """
@@ -404,7 +405,7 @@ class Mavlink2RestHelper:
             quality=max(1, min(100, int(round(quality)))),
         )
 
-        post(MAVLINK2REST_URL + "/mavlink", data=data)
+        self.post_mavlink(data)
 
     def send_vision_position_estimate(
         self, timestamp, position_estimates, attitude_estimates=(0.0, 0.0, 0.0), reset_counter=0
@@ -428,7 +429,14 @@ class Mavlink2RestHelper:
             return
         data = self.rangefinder_template.format(int(distance * 100))
 
-        post(MAVLINK2REST_URL + "/mavlink", data=data)
+        self.post_mavlink(data)
+
+    def post_mavlink(self, data: str):
+        """Post an injected MAVLink frame with a monotonically advancing sequence."""
+        message = json.loads(data)
+        message["header"]["sequence"] = self.sequence
+        self.sequence = (self.sequence + 1) % 256
+        return post(MAVLINK2REST_URL + "/mavlink", data=json.dumps(message))
 
     def set_gps_origin(self, lat, lon):
         data = self.gps_origin_template.format(lat=int(float(lat) * 1e7), lon=int(float(lon) * 1e7))

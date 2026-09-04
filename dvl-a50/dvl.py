@@ -24,6 +24,13 @@ DVL_FORWARD = 2
 DVL_DOWN_REVERSED = 3
 LATLON_TO_CM = 1.1131884502145034e5
 
+# The A50 can publish velocity samples far faster than PX4 needs.  Sending one
+# MAVLink message for every received sample lets a temporary TCP backlog turn
+# into a large UDP burst at the autopilot.  Bound each output independently:
+# PX4 needs the DVL velocity at 10 Hz, while 5 Hz is sufficient for altitude.
+ODOMETRY_PERIOD_S = 0.1
+RANGEFINDER_PERIOD_S = 0.2
+
 
 class MessageType(str, Enum):
     POSITION_DELTA = "POSITION_DELTA"
@@ -80,6 +87,8 @@ class DvlDriver(threading.Thread):
         # used for calculating attitude delta
         self.last_attitude = (0, 0, 0)
         self.current_attitude = (0, 0, 0)
+        self.last_odometry_send_time = float("-inf")
+        self.last_rangefinder_send_time = float("-inf")
 
     def report_status(self, msg: str) -> None:
         self.status = msg
@@ -391,8 +400,11 @@ class DvlDriver(threading.Thread):
             logger.info("Invalid  dvl reading, ignoring it.")
             return
 
-        if self.rangefinder and alt > 0.05:
+        now = time.monotonic()
+
+        if self.rangefinder and alt > 0.05 and now - self.last_rangefinder_send_time >= RANGEFINDER_PERIOD_S:
             self.mav.send_rangefinder(alt)
+            self.last_rangefinder_send_time = now
 
         position_delta = [0, 0, 0]
         attitude_delta = [0, 0, 0]
@@ -417,8 +429,10 @@ class DvlDriver(threading.Thread):
             velocity = self.transform_velocity(vx, vy, vz)
             self.mav.send_vision_speed_estimate(velocity)
         elif self.should_send == MessageType.ODOMETRY:
-            velocity = self.transform_velocity(vx, vy, vz)
-            self.mav.send_odometry(velocity, velocity_stddev=fom, quality=confidence)
+            if now - self.last_odometry_send_time >= ODOMETRY_PERIOD_S:
+                velocity = self.transform_velocity(vx, vy, vz)
+                self.mav.send_odometry(velocity, velocity_stddev=fom, quality=confidence)
+                self.last_odometry_send_time = now
 
         self.last_attitude = self.current_attitude
 
@@ -471,7 +485,15 @@ class DvlDriver(threading.Thread):
             data = None
             if r:
                 try:
-                    recv = self.socket.recv(1024).decode()
+                    # While disabled, this driver intentionally does not call
+                    # recv(), but the DVL's TCP connection remains open. Linux
+                    # therefore queues received DVL samples in this socket's
+                    # receive buffer until TCP flow control pauses the DVL.
+                    # Read up to one typical full queue (64 KiB) at once, then
+                    # retain only the newest complete sample below. Replaying
+                    # that queued history after re-enable would turn a 10 Hz
+                    # sensor stream into a high-rate MAVLink burst at PX4.
+                    recv = self.socket.recv(65536).decode()
                     connected = True
                     if recv:
                         self.last_recv_time = time.time()
@@ -482,12 +504,12 @@ class DvlDriver(threading.Thread):
                 except Exception as e:
                     logger.warning(f"Error receiving: {e}")
 
-            # Extract 1 complete line from the buffer if available
-            if len(buf) > 0:
-                lines = buf.split("\n", 1)
-                if len(lines) > 1:
-                    buf = lines[1]
-                    data = json.loads(lines[0])
+            # Extract the newest complete line.  Keep only an incomplete tail
+            # for the next recv; older measurements have already been
+            # superseded by the newest DVL sample.
+            if "\n" in buf:
+                complete, buf = buf.rsplit("\n", 1)
+                data = json.loads(complete.rsplit("\n", 1)[-1])
 
             if not connected:
                 buf = ""

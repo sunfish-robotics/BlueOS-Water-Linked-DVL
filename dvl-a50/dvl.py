@@ -514,7 +514,11 @@ class DvlDriver(threading.Thread):
             if not connected:
                 buf = ""
                 self.report_status("restarting")
-                self.reconnect()
+                # reconnect() returns whether the new TCP socket is usable.
+                # Preserve that result: otherwise this loop immediately tears
+                # down a successful reconnect every 3 ms, creating a rapid
+                # connection storm until a sample happens to arrive first.
+                connected = self.reconnect()
                 time.sleep(0.003)
                 continue
 

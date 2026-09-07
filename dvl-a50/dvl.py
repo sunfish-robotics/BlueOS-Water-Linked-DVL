@@ -8,10 +8,11 @@ import os
 import socket
 import threading
 import time
+from collections import deque
 from enum import Enum
 from select import select
 from statistics import median
-from typing import Any, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional
 
 from blueoshelper import request
 from dvlfinder import find_the_dvl
@@ -23,6 +24,12 @@ DVL_DOWN = 1
 DVL_FORWARD = 2
 DVL_DOWN_REVERSED = 3
 DVL_BEAM_ANGLE_DEG = 22.5
+DVL_BEAM_COUNT = 4
+# A large difference between beams is expected over sloped terrain, but a much
+# larger spread is normally a bad bottom-return candidate rather than clearance.
+DVL_MAX_PROJECTED_BEAM_SPREAD_M = 1.5
+RANGEFINDER_MEDIAN_WINDOW_SAMPLES = 3
+RANGEFINDER_FILTER_RESET_S = 1.0
 RANGEFINDER_DISTANCE_REPORTED = "reported"
 RANGEFINDER_DISTANCE_BEAM_MEDIAN = "beam_median"
 RANGEFINDER_DISTANCE_SOURCES = (
@@ -98,6 +105,8 @@ class DvlDriver(threading.Thread):
         self.current_attitude = (0, 0, 0)
         self.last_odometry_send_time = float("-inf")
         self.last_rangefinder_send_time = float("-inf")
+        self.last_rangefinder_distance_time = float("-inf")
+        self.rangefinder_distance_history: Deque[float] = deque(maxlen=RANGEFINDER_MEDIAN_WINDOW_SAMPLES)
 
     def report_status(self, msg: str) -> None:
         self.status = msg
@@ -322,13 +331,16 @@ class DvlDriver(threading.Thread):
         if source not in RANGEFINDER_DISTANCE_SOURCES:
             return False
 
+        if source != self.rangefinder_distance_source:
+            self.rangefinder_distance_history.clear()
+            self.last_rangefinder_distance_time = float("-inf")
         self.rangefinder_distance_source = source
         self.save_settings()
         return True
 
     @staticmethod
     def rangefinder_distance(data: Dict[str, Any], source: str) -> Optional[float]:
-        """Return a DVL-reported or median projected-beam bottom distance in metres."""
+        """Return a DVL-reported or quality-gated projected-beam bottom distance in metres."""
         if source == RANGEFINDER_DISTANCE_REPORTED:
             return data["altitude"]
         if source != RANGEFINDER_DISTANCE_BEAM_MEDIAN:
@@ -339,7 +351,25 @@ class DvlDriver(threading.Thread):
             for beam in data.get("transducers", [])
             if beam.get("beam_valid") and isinstance(beam.get("distance"), (int, float)) and beam["distance"] > 0
         ]
-        return median(beam_distances) if beam_distances else None
+        if len(beam_distances) != DVL_BEAM_COUNT:
+            return None
+        if max(beam_distances) - min(beam_distances) > DVL_MAX_PROJECTED_BEAM_SPREAD_M:
+            return None
+        return median(beam_distances)
+
+    def filtered_rangefinder_distance(self, distance: Optional[float], now: float) -> Optional[float]:
+        """Apply a short median filter without publishing a stale distance after a long gap."""
+        if distance is None:
+            return None
+
+        if now - self.last_rangefinder_distance_time > RANGEFINDER_FILTER_RESET_S:
+            self.rangefinder_distance_history.clear()
+
+        self.last_rangefinder_distance_time = now
+        self.rangefinder_distance_history.append(distance)
+        if len(self.rangefinder_distance_history) < RANGEFINDER_MEDIAN_WINDOW_SAMPLES:
+            return None
+        return median(self.rangefinder_distance_history)
 
     def load_params(self, selector: str) -> bool:
         """
@@ -441,6 +471,8 @@ class DvlDriver(threading.Thread):
         now = time.monotonic()
 
         rangefinder_distance = self.rangefinder_distance(data, self.rangefinder_distance_source)
+        if self.rangefinder_distance_source == RANGEFINDER_DISTANCE_BEAM_MEDIAN:
+            rangefinder_distance = self.filtered_rangefinder_distance(rangefinder_distance, now)
         if (
             self.rangefinder
             and rangefinder_distance is not None

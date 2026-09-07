@@ -34,7 +34,7 @@
 
 When rangefinder output is enabled, select its source in the extension UI:
 
-- **Median of valid projected beam distances** (default) projects each valid transducer slant range onto the DVL down axis using the A50/A125 22.5 degree beam angle, then takes their median. It requires all four positive, valid beam ranges and rejects a projected inter-beam spread over 1.5 m. Accepted values use a three-sample temporal median; output starts after three qualifying samples and resumes after a one-second gap with three new qualifying samples. No `DISTANCE_SENSOR` message is sent for a rejected sample.
+- **Median of valid projected beam distances** (default) projects each positive, valid transducer slant range onto the DVL down axis using the A50/A125 22.5 degree beam angle. Each beam has its own three-sample temporal median. The output is the second-smallest filtered beam distance, requiring at least two filtered beams. This is conservative for clearance while tolerating one deep or invalid beam. Each beam resets after a one-second gap; delayed, future-dated, or out-of-order DVL frames are not used. No `DISTANCE_SENSOR` message is sent until at least two beams have three fresh samples.
 - **DVL-reported bottom distance** forwards the DVL's `altitude` field.
 
 The selected source is persisted in the extension settings. Both sources describe clearance along the DVL down axis; neither adds vehicle pitch/roll compensation.

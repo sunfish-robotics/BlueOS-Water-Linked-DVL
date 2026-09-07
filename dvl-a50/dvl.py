@@ -24,12 +24,10 @@ DVL_DOWN = 1
 DVL_FORWARD = 2
 DVL_DOWN_REVERSED = 3
 DVL_BEAM_ANGLE_DEG = 22.5
-DVL_BEAM_COUNT = 4
-# A large difference between beams is expected over sloped terrain, but a much
-# larger spread is normally a bad bottom-return candidate rather than clearance.
-DVL_MAX_PROJECTED_BEAM_SPREAD_M = 1.5
-RANGEFINDER_MEDIAN_WINDOW_SAMPLES = 3
-RANGEFINDER_FILTER_RESET_S = 1.0
+DVL_MIN_USABLE_BEAMS = 2
+RANGEFINDER_BEAM_FILTER_WINDOW_SAMPLES = 3
+RANGEFINDER_BEAM_FILTER_RESET_S = 1.0
+DVL_MAX_RANGEFINDER_SAMPLE_AGE_S = 1.0
 RANGEFINDER_DISTANCE_REPORTED = "reported"
 RANGEFINDER_DISTANCE_BEAM_MEDIAN = "beam_median"
 RANGEFINDER_DISTANCE_SOURCES = (
@@ -105,8 +103,9 @@ class DvlDriver(threading.Thread):
         self.current_attitude = (0, 0, 0)
         self.last_odometry_send_time = float("-inf")
         self.last_rangefinder_send_time = float("-inf")
-        self.last_rangefinder_distance_time = float("-inf")
-        self.rangefinder_distance_history: Deque[float] = deque(maxlen=RANGEFINDER_MEDIAN_WINDOW_SAMPLES)
+        self.last_rangefinder_source_timestamp_s = float("-inf")
+        self.rangefinder_beam_timestamps_s: Dict[int, float] = {}
+        self.rangefinder_beam_histories: Dict[int, Deque[float]] = {}
 
     def report_status(self, msg: str) -> None:
         self.status = msg
@@ -332,44 +331,78 @@ class DvlDriver(threading.Thread):
             return False
 
         if source != self.rangefinder_distance_source:
-            self.rangefinder_distance_history.clear()
-            self.last_rangefinder_distance_time = float("-inf")
+            self.last_rangefinder_source_timestamp_s = float("-inf")
+            self.rangefinder_beam_timestamps_s.clear()
+            self.rangefinder_beam_histories.clear()
         self.rangefinder_distance_source = source
         self.save_settings()
         return True
 
     @staticmethod
     def rangefinder_distance(data: Dict[str, Any], source: str) -> Optional[float]:
-        """Return a DVL-reported or quality-gated projected-beam bottom distance in metres."""
+        """Return a DVL-reported or conservative projected-beam bottom distance in metres."""
         if source == RANGEFINDER_DISTANCE_REPORTED:
             return data["altitude"]
         if source != RANGEFINDER_DISTANCE_BEAM_MEDIAN:
             return None
 
-        beam_distances = [
+        beam_distances = sorted(
             beam["distance"] * math.cos(math.radians(DVL_BEAM_ANGLE_DEG))
             for beam in data.get("transducers", [])
             if beam.get("beam_valid") and isinstance(beam.get("distance"), (int, float)) and beam["distance"] > 0
-        ]
-        if len(beam_distances) != DVL_BEAM_COUNT:
+        )
+        if len(beam_distances) < DVL_MIN_USABLE_BEAMS:
             return None
-        if max(beam_distances) - min(beam_distances) > DVL_MAX_PROJECTED_BEAM_SPREAD_M:
-            return None
-        return median(beam_distances)
+        return beam_distances[1]
 
-    def filtered_rangefinder_distance(self, distance: Optional[float], now: float) -> Optional[float]:
-        """Apply a short median filter without publishing a stale distance after a long gap."""
-        if distance is None:
-            return None
+    def rangefinder_frame_is_fresh(self, data: Dict[str, Any], wall_time_s: float) -> bool:
+        """Reject delayed, future-dated, and out-of-order DVL range samples."""
+        timestamp_us = data.get("time_of_transmission")
+        if not isinstance(timestamp_us, (int, float)) or timestamp_us <= 0:
+            logger.warning("DVL range sample has no usable transmission timestamp, ignoring it.")
+            return False
 
-        if now - self.last_rangefinder_distance_time > RANGEFINDER_FILTER_RESET_S:
-            self.rangefinder_distance_history.clear()
+        timestamp_s = timestamp_us / 1e6
+        if abs(wall_time_s - timestamp_s) > DVL_MAX_RANGEFINDER_SAMPLE_AGE_S:
+            logger.warning("DVL range sample is not current, ignoring it.")
+            return False
+        if timestamp_s <= self.last_rangefinder_source_timestamp_s:
+            logger.warning("DVL range sample timestamp is out of order, ignoring it.")
+            return False
 
-        self.last_rangefinder_distance_time = now
-        self.rangefinder_distance_history.append(distance)
-        if len(self.rangefinder_distance_history) < RANGEFINDER_MEDIAN_WINDOW_SAMPLES:
+        self.last_rangefinder_source_timestamp_s = timestamp_s
+        return True
+
+    def filtered_rangefinder_distance(self, data: Dict[str, Any], timestamp_s: float) -> Optional[float]:
+        """Median-filter each beam independently, then return the conservative lower median."""
+        filtered_beams = []
+        for beam in data.get("transducers", []):
+            beam_id = beam.get("id")
+            distance = beam.get("distance")
+            if not (
+                isinstance(beam_id, int)
+                and beam.get("beam_valid")
+                and isinstance(distance, (int, float))
+                and distance > 0
+            ):
+                continue
+
+            history = self.rangefinder_beam_histories.setdefault(
+                beam_id,
+                deque(maxlen=RANGEFINDER_BEAM_FILTER_WINDOW_SAMPLES),
+            )
+            last_timestamp_s = self.rangefinder_beam_timestamps_s.get(beam_id, float("-inf"))
+            if timestamp_s - last_timestamp_s > RANGEFINDER_BEAM_FILTER_RESET_S:
+                history.clear()
+
+            self.rangefinder_beam_timestamps_s[beam_id] = timestamp_s
+            history.append(distance * math.cos(math.radians(DVL_BEAM_ANGLE_DEG)))
+            if len(history) == RANGEFINDER_BEAM_FILTER_WINDOW_SAMPLES:
+                filtered_beams.append(median(history))
+
+        if len(filtered_beams) < DVL_MIN_USABLE_BEAMS:
             return None
-        return median(self.rangefinder_distance_history)
+        return sorted(filtered_beams)[1]
 
     def load_params(self, selector: str) -> bool:
         """
@@ -472,7 +505,10 @@ class DvlDriver(threading.Thread):
 
         rangefinder_distance = self.rangefinder_distance(data, self.rangefinder_distance_source)
         if self.rangefinder_distance_source == RANGEFINDER_DISTANCE_BEAM_MEDIAN:
-            rangefinder_distance = self.filtered_rangefinder_distance(rangefinder_distance, now)
+            if self.rangefinder_frame_is_fresh(data, time.time()):
+                rangefinder_distance = self.filtered_rangefinder_distance(data, data["time_of_transmission"] / 1e6)
+            else:
+                rangefinder_distance = None
         if (
             self.rangefinder
             and rangefinder_distance is not None

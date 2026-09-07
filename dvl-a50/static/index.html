@@ -42,6 +42,10 @@
 							<h2>Settings</h2>
 							<v-switch v-model="this.enabled" inset :label="`Enable DVL driver`" @change="setDvlEnabled($event)"></v-switch>
 							<v-switch v-model="this.rangefinder" inset :label="`Send range data through MAVLink`" @change="setDvlAsRangefinder($event)"></v-switch>
+							<v-radio-group v-model="this.rangefinderDistanceSource" label="Range distance source" @change="setRangefinderDistanceSource($event)">
+								<v-radio label="Median of valid projected beam distances" value="beam_median"></v-radio>
+								<v-radio label="DVL-reported bottom distance" value="reported"></v-radio>
+							</v-radio-group>
 							<v-btn id="btn-load-dvl" type="button" class="btn btn-primary" @click="loadParams('dvl');">Load parameters for DVL</v-btn>
 							<v-btn id="btn-load-dvl-gps" type="button" class="btn btn-primary" @click="loadParams('dvl_gps');">Load parameters for DVL+GPS</v-btn>
 							<h2>Status</h2>
@@ -123,6 +127,7 @@
 				newLat: 0,
 				newLong: 0,
 				rangefinder: null,
+				rangefinderDistanceSource: null,
 				messageToSend: null,
 				hostname: null,
 				rovMarker: undefined,
@@ -150,6 +155,7 @@
 							this.newLong = data.origin[1]
 						}
 						this.rangefinder = data.rangefinder
+						this.rangefinderDistanceSource = data.rangefinder_distance_source
 						this.messageToSend = data.messageToSend
 						this.hostname = data.hostname
 						this.messageToSend = data.should_send
@@ -232,6 +238,14 @@
 				const request = new XMLHttpRequest();
 				request.timeout = 800;
 				request.open('GET', 'use_as_rangefinder/' + value, true);
+				request.send();
+			},
+
+			/* Selects the source used for DISTANCE_SENSOR.current_distance */
+			setRangefinderDistanceSource(value) {
+				const request = new XMLHttpRequest();
+				request.timeout = 800;
+				request.open('GET', 'rangefinder_distance_source/' + value, true);
 				request.send();
 			},
 

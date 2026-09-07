@@ -5,9 +5,8 @@ Driver for the Water Linked DVL A-50
 
 import json
 
-from flask import Flask
-
 from dvl import DvlDriver
+from flask import Flask
 
 # set the project root directory as the static folder, you can set others.
 app = Flask(__name__, static_url_path="/static", static_folder="static")
@@ -64,6 +63,10 @@ class API:
             return self.dvl.set_use_as_rangefinder(enabled == "true")
         return False
 
+    def set_rangefinder_distance_source(self, source: str) -> bool:
+        """Select the distance source used for DISTANCE_SENSOR messages."""
+        return self.dvl.set_rangefinder_distance_source(source)
+
     def load_params(self, selector: str) -> bool:
         """
         Load parameters
@@ -91,6 +94,10 @@ if __name__ == "__main__":
     @app.route("/use_as_rangefinder/<enable>")
     def set_use_rangefinder(enable: str):
         return str(api.set_use_as_rangefinder(enable))
+
+    @app.route("/rangefinder_distance_source/<source>")
+    def set_rangefinder_distance_source(source: str):
+        return str(api.set_rangefinder_distance_source(source))
 
     @app.route("/load_params/<selector>")
     def load_params(selector: str):

@@ -10,18 +10,25 @@ import threading
 import time
 from enum import Enum
 from select import select
-from typing import Any, Dict, List
-
-from loguru import logger
+from statistics import median
+from typing import Any, Dict, List, Optional
 
 from blueoshelper import request
 from dvlfinder import find_the_dvl
+from loguru import logger
 from mavlink2resthelper import GPS_GLOBAL_ORIGIN_ID, Mavlink2RestHelper
 
 HOSTNAME = "waterlinked-dvl.local"
 DVL_DOWN = 1
 DVL_FORWARD = 2
 DVL_DOWN_REVERSED = 3
+DVL_BEAM_ANGLE_DEG = 22.5
+RANGEFINDER_DISTANCE_REPORTED = "reported"
+RANGEFINDER_DISTANCE_BEAM_MEDIAN = "beam_median"
+RANGEFINDER_DISTANCE_SOURCES = (
+    RANGEFINDER_DISTANCE_REPORTED,
+    RANGEFINDER_DISTANCE_BEAM_MEDIAN,
+)
 LATLON_TO_CM = 1.1131884502145034e5
 
 # The A50 can publish velocity samples far faster than PX4 needs.  Sending one
@@ -61,6 +68,7 @@ class DvlDriver(threading.Thread):
     orientation = DVL_DOWN
     enabled = True
     rangefinder = True
+    rangefinder_distance_source = RANGEFINDER_DISTANCE_BEAM_MEDIAN
     hostname = HOSTNAME
     timeout = 3  # tcp timeout in seconds
     origin = [0, 0]
@@ -70,6 +78,7 @@ class DvlDriver(threading.Thread):
         "hostname",
         "origin",
         "rangefinder",
+        "rangefinder_distance_source",
         "should_send",
     ]
     settings_path = os.path.join(os.path.expanduser("~"), ".config", "dvl", "settings.json")
@@ -103,6 +112,12 @@ class DvlDriver(threading.Thread):
                 data = json.load(settings)
                 for setting_name in self.saved_settings:
                     if setting_name in data:
+                        if (
+                            setting_name == "rangefinder_distance_source"
+                            and data[setting_name] not in RANGEFINDER_DISTANCE_SOURCES
+                        ):
+                            logger.warning("Invalid rangefinder distance source, keeping the default.")
+                            continue
                         setattr(self, setting_name, data[setting_name])
                     else:
                         default = getattr(self, setting_name)
@@ -302,6 +317,30 @@ class DvlDriver(threading.Thread):
             self.mav.set_param("RNGFND1_TYPE", "MAV_PARAM_TYPE_UINT8", 10)  # MAVLINK
         return True
 
+    def set_rangefinder_distance_source(self, source: str) -> bool:
+        """Select the source used for DISTANCE_SENSOR.current_distance."""
+        if source not in RANGEFINDER_DISTANCE_SOURCES:
+            return False
+
+        self.rangefinder_distance_source = source
+        self.save_settings()
+        return True
+
+    @staticmethod
+    def rangefinder_distance(data: Dict[str, Any], source: str) -> Optional[float]:
+        """Return a DVL-reported or median projected-beam bottom distance in metres."""
+        if source == RANGEFINDER_DISTANCE_REPORTED:
+            return data["altitude"]
+        if source != RANGEFINDER_DISTANCE_BEAM_MEDIAN:
+            return None
+
+        beam_distances = [
+            beam["distance"] * math.cos(math.radians(DVL_BEAM_ANGLE_DEG))
+            for beam in data.get("transducers", [])
+            if beam.get("beam_valid") and isinstance(beam.get("distance"), (int, float)) and beam["distance"] > 0
+        ]
+        return median(beam_distances) if beam_distances else None
+
     def load_params(self, selector: str) -> bool:
         """
         Load EK3_SRC1 parameters to match the use case:
@@ -377,11 +416,10 @@ class DvlDriver(threading.Thread):
 
     def handle_velocity(self, data: Dict[str, Any]) -> None:
         # extract velocity data from the DVL JSON
-        vx, vy, vz, alt, valid, fom = (
+        vx, vy, vz, valid, fom = (
             data["vx"],
             data["vy"],
             data["vz"],
-            data["altitude"],
             data["velocity_valid"],
             data["fom"],
         )
@@ -402,8 +440,14 @@ class DvlDriver(threading.Thread):
 
         now = time.monotonic()
 
-        if self.rangefinder and alt > 0.05 and now - self.last_rangefinder_send_time >= RANGEFINDER_PERIOD_S:
-            self.mav.send_rangefinder(alt)
+        rangefinder_distance = self.rangefinder_distance(data, self.rangefinder_distance_source)
+        if (
+            self.rangefinder
+            and rangefinder_distance is not None
+            and rangefinder_distance > 0.05
+            and now - self.last_rangefinder_send_time >= RANGEFINDER_PERIOD_S
+        ):
+            self.mav.send_rangefinder(rangefinder_distance)
             self.last_rangefinder_send_time = now
 
         position_delta = [0, 0, 0]

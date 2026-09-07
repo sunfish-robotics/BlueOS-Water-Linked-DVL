@@ -30,6 +30,15 @@
 ### v1.0.1
  - Fixed an issue where the driver was sending Rangefinder messages with invalid data
 
+### Rangefinder distance source
+
+When rangefinder output is enabled, select its source in the extension UI:
+
+- **Median of valid projected beam distances** (default) projects each valid transducer slant range onto the DVL down axis using the A50/A125 22.5 degree beam angle, then takes their median. No `DISTANCE_SENSOR` message is sent if that sample has no valid positive beam range.
+- **DVL-reported bottom distance** forwards the DVL's `altitude` field.
+
+The selected source is persisted in the extension settings. Both sources describe clearance along the DVL down axis; neither adds vehicle pitch/roll compensation.
+
 This is a docker implementation of a Water Linked DVL A50 and A125 driver as a BlueOS Extension.
 
 The extension publishes valid DVL velocity samples as MAVLink `ODOMETRY` by

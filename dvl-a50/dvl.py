@@ -478,6 +478,8 @@ class DvlDriver(threading.Thread):
         return False
 
     def handle_velocity(self, data: Dict[str, Any]) -> None:
+        # Preserve bad beam returns even when the velocity solution is invalid.
+        self.mav.send_dvl_beams(data)
         # extract velocity data from the DVL JSON
         vx, vy, vz, valid, fom = (
             data["vx"],

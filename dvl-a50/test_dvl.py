@@ -21,6 +21,37 @@ sys.modules.setdefault("requests", types.SimpleNamespace())
 dvl = importlib.import_module("dvl")
 
 
+class BeamDiagnosticsTest(unittest.TestCase):
+    def test_raw_ranges_and_invalid_flags_survive(self):
+        helper = dvl.Mavlink2RestHelper.__new__(dvl.Mavlink2RestHelper)
+        messages = []
+        helper.post_mavlink = lambda message: messages.append(json.loads(message))
+        helper.send_dvl_beams(
+            {
+                "velocity_valid": False,
+                "transducers": [
+                    {"id": 2, "distance": 0.07, "beam_valid": False},
+                    {"id": 0, "distance": 2.42, "beam_valid": True},
+                    {"id": 1, "distance": float("nan"), "beam_valid": True},
+                    {"id": 9, "distance": 9, "beam_valid": True},
+                ],
+            }
+        )
+        message = messages[0]["message"]
+        self.assertEqual(message["data"][:9], [2.42, -1, 0.07, -1, 1, 0, 0, -1, 0])
+        self.assertEqual(len(message["data"]), 58)
+        self.assertEqual(message["name"], list("DVL_BEAMS\0"))
+        self.assertEqual(message["array_id"], 48001)
+
+    def test_invalid_velocity_still_publishes_beams(self):
+        driver = dvl.DvlDriver.__new__(dvl.DvlDriver)
+        sent = []
+        driver.mav = types.SimpleNamespace(send_dvl_beams=sent.append)
+        sample = dict(vx=0, vy=0, vz=0, velocity_valid=False, fom=1, time=200, transducers=[])
+        driver.handle_velocity(sample)
+        self.assertEqual(sent, [sample])
+
+
 class StreamBatchTest(unittest.TestCase):
     def test_position_does_not_discard_velocity(self):
         velocity = {"type": "velocity", "vx": 1, "velocity_valid": True}

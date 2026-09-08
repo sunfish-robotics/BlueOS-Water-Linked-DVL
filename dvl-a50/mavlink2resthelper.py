@@ -1,6 +1,6 @@
 import json
 import time
-from math import radians
+from math import isfinite, radians
 from typing import Any, Optional
 
 import requests
@@ -422,6 +422,35 @@ class Mavlink2RestHelper:
             reset_counter=reset_counter,
         )
         logger.info(post(MAVLINK2REST_URL + "/mavlink", data=data))
+
+    def send_dvl_beams(self, sample):
+        """Publish raw diagnostic beams without creating EKF range inputs."""
+        values = [0.0] * 58
+        values[:4] = [-1.0] * 4
+        values[4:8] = [-1.0] * 4
+        for beam in sample.get("transducers", []):
+            beam_id = beam.get("id")
+            if type(beam_id) is not int or not 0 <= beam_id < 4:
+                continue
+            distance = beam.get("distance")
+            finite = isinstance(distance, (int, float)) and isfinite(distance)
+            values[beam_id] = float(distance) if finite else -1.0
+            values[4 + beam_id] = float(bool(beam.get("beam_valid"))) if finite else 0.0
+        values[8] = float(bool(sample.get("velocity_valid")))
+        self.post_mavlink(
+            json.dumps(
+                {
+                    "header": {"system_id": 255, "component_id": 0, "sequence": 0},
+                    "message": {
+                        "type": "DEBUG_FLOAT_ARRAY",
+                        "time_usec": int(sample.get("time_of_transmission", 0)),
+                        "name": list("DVL_BEAMS\0"),
+                        "array_id": 48001,
+                        "data": values,
+                    },
+                }
+            )
+        )
 
     def send_rangefinder(self, distance: float):
         "Sends message DISTANCE_SENSOR to flight controller"

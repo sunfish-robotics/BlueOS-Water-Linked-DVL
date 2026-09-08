@@ -21,6 +21,47 @@ sys.modules.setdefault("requests", types.SimpleNamespace())
 dvl = importlib.import_module("dvl")
 
 
+class StreamBatchTest(unittest.TestCase):
+    def test_position_does_not_discard_velocity(self):
+        velocity = {"type": "velocity", "vx": 1, "velocity_valid": True}
+        position = {"type": "position_local", "x": 2}
+        for samples in ([velocity, position], [position, velocity]):
+            with self.subTest(samples=samples):
+                actual, tail = dvl.DvlDriver.extract_latest_samples(
+                    "".join(json.dumps(sample) + "\n" for sample in samples)
+                )
+                self.assertEqual(actual, samples)
+                self.assertEqual(tail, "")
+
+    def test_backlog_keeps_only_latest_per_type_in_order(self):
+        samples = [{"type": kind, "sequence": i} for i in range(100) for kind in ("velocity", "position_local")]
+        actual, tail = dvl.DvlDriver.extract_latest_samples("".join(json.dumps(sample) + "\n" for sample in samples))
+        self.assertEqual(actual, samples[-2:])
+        self.assertEqual(tail, "")
+
+    def test_partial_line_survives_next_receive(self):
+        sample = {"type": "velocity", "vx": 1}
+        line = json.dumps(sample) + "\n"
+        actual, tail = dvl.DvlDriver.extract_latest_samples(line[:12])
+        self.assertEqual(actual, [])
+        actual, tail = dvl.DvlDriver.extract_latest_samples(tail + line[12:])
+        self.assertEqual(actual, [sample])
+        self.assertEqual(tail, "")
+
+    def test_invalid_velocity_supersedes_old_valid_velocity(self):
+        samples = [{"type": "velocity", "velocity_valid": valid} for valid in (True, False)]
+        actual, _ = dvl.DvlDriver.extract_latest_samples("".join(json.dumps(sample) + "\n" for sample in samples))
+        self.assertEqual(actual, [samples[-1]])
+
+    def test_malformed_and_unknown_lines_do_not_hide_velocity(self):
+        sample = {"type": "velocity", "vx": 1}
+        actual, tail = dvl.DvlDriver.extract_latest_samples(
+            json.dumps(sample) + '\nnot-json\n[]\n{"type":"status"}\npartial'
+        )
+        self.assertEqual(actual, [sample])
+        self.assertEqual(tail, "partial")
+
+
 class RangefinderDistanceTest(unittest.TestCase):
     """Verify the source selection used before sending DISTANCE_SENSOR."""
 

@@ -572,6 +572,28 @@ class DvlDriver(threading.Thread):
         except Exception as e:
             self.report_status(e)
 
+    @staticmethod
+    def extract_latest_samples(buf):
+        """Coalesce backlog per message type without losing velocity to position."""
+        if "\n" not in buf:
+            return [], buf
+        complete, tail = buf.rsplit("\n", 1)
+        latest = {}
+        for line in complete.splitlines():
+            try:
+                sample = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(sample, dict):
+                continue
+            kind = sample.get("type")
+            if kind in ("velocity", "position_local"):
+                # Preserve the order of the retained samples, including invalid
+                # velocity samples: an older valid reading must not replace them.
+                latest.pop(kind, None)
+                latest[kind] = sample
+        return list(latest.values()), tail
+
     def run(self):
         """
         Runs the main routing
@@ -594,7 +616,7 @@ class DvlDriver(threading.Thread):
                 continue
 
             r, _, _ = select([self.socket], [], [], 0)
-            data = None
+            samples = []
             if r:
                 try:
                     # While disabled, this driver intentionally does not call
@@ -602,7 +624,7 @@ class DvlDriver(threading.Thread):
                     # therefore queues received DVL samples in this socket's
                     # receive buffer until TCP flow control pauses the DVL.
                     # Read up to one typical full queue (64 KiB) at once, then
-                    # retain only the newest complete sample below. Replaying
+                    # retain only the newest sample of each type. Replaying
                     # that queued history after re-enable would turn a 10 Hz
                     # sensor stream into a high-rate MAVLink burst at PX4.
                     recv = self.socket.recv(65536).decode()
@@ -616,12 +638,7 @@ class DvlDriver(threading.Thread):
                 except Exception as e:
                     logger.warning(f"Error receiving: {e}")
 
-            # Extract the newest complete line.  Keep only an incomplete tail
-            # for the next recv; older measurements have already been
-            # superseded by the newest DVL sample.
-            if "\n" in buf:
-                complete, buf = buf.rsplit("\n", 1)
-                data = json.loads(complete.rsplit("\n", 1)[-1])
+            samples, buf = self.extract_latest_samples(buf)
 
             if not connected:
                 buf = ""
@@ -634,7 +651,7 @@ class DvlDriver(threading.Thread):
                 time.sleep(0.003)
                 continue
 
-            if not data:
+            if not samples:
                 if time.time() - self.last_recv_time > self.timeout:
                     buf = ""
                     self.report_status("timeout, restarting")
@@ -644,13 +661,11 @@ class DvlDriver(threading.Thread):
 
             self.status = "Running"
 
-            if "type" not in data:
-                continue
-
-            if data["type"] == "velocity":
-                self.handle_velocity(data)
-            elif data["type"] == "position_local":
-                self.handle_position_local(data)
+            for data in samples:
+                if data["type"] == "velocity":
+                    self.handle_velocity(data)
+                elif data["type"] == "position_local":
+                    self.handle_position_local(data)
 
             self.check_temperature()
             time.sleep(0.003)

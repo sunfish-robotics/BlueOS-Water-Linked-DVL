@@ -30,3 +30,4 @@ jobs:
     - name: Run tests
       run: |
         ./.hooks/pre-push
+        python -m unittest discover -s dvl-a50 -p 'test_*.py'

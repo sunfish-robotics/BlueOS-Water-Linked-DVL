@@ -8,9 +8,11 @@ import os
 import socket
 import threading
 import time
+from collections import deque
 from enum import Enum
 from select import select
-from typing import Any, Dict, List
+from statistics import median
+from typing import Any, Deque, Dict, List, Optional
 
 from loguru import logger
 
@@ -22,7 +24,25 @@ HOSTNAME = "waterlinked-dvl.local"
 DVL_DOWN = 1
 DVL_FORWARD = 2
 DVL_DOWN_REVERSED = 3
+DVL_BEAM_ANGLE_DEG = 22.5
+DVL_MIN_USABLE_BEAMS = 2
+RANGEFINDER_BEAM_FILTER_WINDOW_SAMPLES = 3
+RANGEFINDER_BEAM_FILTER_RESET_S = 1.0
+DVL_MAX_RANGEFINDER_SAMPLE_AGE_S = 1.0
+RANGEFINDER_DISTANCE_REPORTED = "reported"
+RANGEFINDER_DISTANCE_BEAM_MEDIAN = "beam_median"
+RANGEFINDER_DISTANCE_SOURCES = (
+    RANGEFINDER_DISTANCE_REPORTED,
+    RANGEFINDER_DISTANCE_BEAM_MEDIAN,
+)
 LATLON_TO_CM = 1.1131884502145034e5
+
+# The A50 can publish velocity samples far faster than PX4 needs.  Sending one
+# MAVLink message for every received sample lets a temporary TCP backlog turn
+# into a large UDP burst at the autopilot.  Bound each output independently:
+# PX4 needs the DVL velocity at 10 Hz, while 5 Hz is sufficient for altitude.
+ODOMETRY_PERIOD_S = 0.1
+RANGEFINDER_PERIOD_S = 0.2
 
 
 class MessageType(str, Enum):
@@ -38,7 +58,6 @@ class MessageType(str, Enum):
 
 # pylint: disable=too-many-instance-attributes
 # pylint: disable=unspecified-encoding
-# pylint: disable=too-many-branches
 # pylint: disable=too-many-statements
 class DvlDriver(threading.Thread):
     """
@@ -54,6 +73,7 @@ class DvlDriver(threading.Thread):
     orientation = DVL_DOWN
     enabled = True
     rangefinder = True
+    rangefinder_distance_source = RANGEFINDER_DISTANCE_BEAM_MEDIAN
     hostname = HOSTNAME
     timeout = 3  # tcp timeout in seconds
     origin = [0, 0]
@@ -63,6 +83,7 @@ class DvlDriver(threading.Thread):
         "hostname",
         "origin",
         "rangefinder",
+        "rangefinder_distance_source",
         "should_send",
     ]
     settings_path = os.path.join(os.path.expanduser("~"), ".config", "dvl", "settings.json")
@@ -80,6 +101,11 @@ class DvlDriver(threading.Thread):
         # used for calculating attitude delta
         self.last_attitude = (0, 0, 0)
         self.current_attitude = (0, 0, 0)
+        self.last_odometry_send_time = float("-inf")
+        self.last_rangefinder_send_time = float("-inf")
+        self.last_rangefinder_source_timestamp_s = float("-inf")
+        self.rangefinder_beam_timestamps_s: Dict[int, float] = {}
+        self.rangefinder_beam_histories: Dict[int, Deque[float]] = {}
 
     def report_status(self, msg: str) -> None:
         self.status = msg
@@ -94,6 +120,12 @@ class DvlDriver(threading.Thread):
                 data = json.load(settings)
                 for setting_name in self.saved_settings:
                     if setting_name in data:
+                        if (
+                            setting_name == "rangefinder_distance_source"
+                            and data[setting_name] not in RANGEFINDER_DISTANCE_SOURCES
+                        ):
+                            logger.warning("Invalid rangefinder distance source, keeping the default.")
+                            continue
                         setattr(self, setting_name, data[setting_name])
                     else:
                         default = getattr(self, setting_name)
@@ -293,6 +325,85 @@ class DvlDriver(threading.Thread):
             self.mav.set_param("RNGFND1_TYPE", "MAV_PARAM_TYPE_UINT8", 10)  # MAVLINK
         return True
 
+    def set_rangefinder_distance_source(self, source: str) -> bool:
+        """Select the source used for DISTANCE_SENSOR.current_distance."""
+        if source not in RANGEFINDER_DISTANCE_SOURCES:
+            return False
+
+        if source != self.rangefinder_distance_source:
+            self.last_rangefinder_source_timestamp_s = float("-inf")
+            self.rangefinder_beam_timestamps_s.clear()
+            self.rangefinder_beam_histories.clear()
+        self.rangefinder_distance_source = source
+        self.save_settings()
+        return True
+
+    @staticmethod
+    def rangefinder_distance(data: Dict[str, Any], source: str) -> Optional[float]:
+        """Return a DVL-reported or conservative projected-beam bottom distance in metres."""
+        if source == RANGEFINDER_DISTANCE_REPORTED:
+            return data["altitude"]
+        if source != RANGEFINDER_DISTANCE_BEAM_MEDIAN:
+            return None
+
+        beam_distances = sorted(
+            beam["distance"] * math.cos(math.radians(DVL_BEAM_ANGLE_DEG))
+            for beam in data.get("transducers", [])
+            if beam.get("beam_valid") and isinstance(beam.get("distance"), (int, float)) and beam["distance"] > 0
+        )
+        if len(beam_distances) < DVL_MIN_USABLE_BEAMS:
+            return None
+        return beam_distances[1]
+
+    def rangefinder_frame_is_fresh(self, data: Dict[str, Any], wall_time_s: float) -> bool:
+        """Reject delayed, future-dated, and out-of-order DVL range samples."""
+        timestamp_us = data.get("time_of_transmission")
+        if not isinstance(timestamp_us, (int, float)) or timestamp_us <= 0:
+            logger.warning("DVL range sample has no usable transmission timestamp, ignoring it.")
+            return False
+
+        timestamp_s = timestamp_us / 1e6
+        if abs(wall_time_s - timestamp_s) > DVL_MAX_RANGEFINDER_SAMPLE_AGE_S:
+            logger.warning("DVL range sample is not current, ignoring it.")
+            return False
+        if timestamp_s <= self.last_rangefinder_source_timestamp_s:
+            logger.warning("DVL range sample timestamp is out of order, ignoring it.")
+            return False
+
+        self.last_rangefinder_source_timestamp_s = timestamp_s
+        return True
+
+    def filtered_rangefinder_distance(self, data: Dict[str, Any], timestamp_s: float) -> Optional[float]:
+        """Median-filter each beam independently, then return the conservative lower median."""
+        filtered_beams = []
+        for beam in data.get("transducers", []):
+            beam_id = beam.get("id")
+            distance = beam.get("distance")
+            if not (
+                isinstance(beam_id, int)
+                and beam.get("beam_valid")
+                and isinstance(distance, (int, float))
+                and distance > 0
+            ):
+                continue
+
+            history = self.rangefinder_beam_histories.setdefault(
+                beam_id,
+                deque(maxlen=RANGEFINDER_BEAM_FILTER_WINDOW_SAMPLES),
+            )
+            last_timestamp_s = self.rangefinder_beam_timestamps_s.get(beam_id, float("-inf"))
+            if timestamp_s - last_timestamp_s > RANGEFINDER_BEAM_FILTER_RESET_S:
+                history.clear()
+
+            self.rangefinder_beam_timestamps_s[beam_id] = timestamp_s
+            history.append(distance * math.cos(math.radians(DVL_BEAM_ANGLE_DEG)))
+            if len(history) == RANGEFINDER_BEAM_FILTER_WINDOW_SAMPLES:
+                filtered_beams.append(median(history))
+
+        if len(filtered_beams) < DVL_MIN_USABLE_BEAMS:
+            return None
+        return sorted(filtered_beams)[1]
+
     def load_params(self, selector: str) -> bool:
         """
         Load EK3_SRC1 parameters to match the use case:
@@ -367,12 +478,18 @@ class DvlDriver(threading.Thread):
         return False
 
     def handle_velocity(self, data: Dict[str, Any]) -> None:
+        # Preserve bad beam returns even when the velocity solution is invalid.
+        mounting_rotation = {
+            DVL_DOWN: [1.0, 0.0, 0.0, 0.0],
+            DVL_DOWN_REVERSED: [0.0, 0.0, 0.0, 1.0],
+            DVL_FORWARD: [math.sqrt(0.5), 0.0, math.sqrt(0.5), 0.0],
+        }.get(self.orientation)
+        self.mav.send_dvl_beams(data, mounting_rotation)
         # extract velocity data from the DVL JSON
-        vx, vy, vz, alt, valid, fom = (
+        vx, vy, vz, valid, fom = (
             data["vx"],
             data["vy"],
             data["vz"],
-            data["altitude"],
             data["velocity_valid"],
             data["fom"],
         )
@@ -391,8 +508,22 @@ class DvlDriver(threading.Thread):
             logger.info("Invalid  dvl reading, ignoring it.")
             return
 
-        if self.rangefinder and alt > 0.05:
-            self.mav.send_rangefinder(alt)
+        now = time.monotonic()
+
+        rangefinder_distance = self.rangefinder_distance(data, self.rangefinder_distance_source)
+        if self.rangefinder_distance_source == RANGEFINDER_DISTANCE_BEAM_MEDIAN:
+            if self.rangefinder_frame_is_fresh(data, time.time()):
+                rangefinder_distance = self.filtered_rangefinder_distance(data, data["time_of_transmission"] / 1e6)
+            else:
+                rangefinder_distance = None
+        if (
+            self.rangefinder
+            and rangefinder_distance is not None
+            and rangefinder_distance > 0.05
+            and now - self.last_rangefinder_send_time >= RANGEFINDER_PERIOD_S
+        ):
+            self.mav.send_rangefinder(rangefinder_distance)
+            self.last_rangefinder_send_time = now
 
         position_delta = [0, 0, 0]
         attitude_delta = [0, 0, 0]
@@ -417,8 +548,10 @@ class DvlDriver(threading.Thread):
             velocity = self.transform_velocity(vx, vy, vz)
             self.mav.send_vision_speed_estimate(velocity)
         elif self.should_send == MessageType.ODOMETRY:
-            velocity = self.transform_velocity(vx, vy, vz)
-            self.mav.send_odometry(velocity, velocity_stddev=fom, quality=confidence)
+            if now - self.last_odometry_send_time >= ODOMETRY_PERIOD_S:
+                velocity = self.transform_velocity(vx, vy, vz)
+                self.mav.send_odometry(velocity, velocity_stddev=fom, quality=confidence)
+                self.last_odometry_send_time = now
 
         self.last_attitude = self.current_attitude
 
@@ -446,6 +579,28 @@ class DvlDriver(threading.Thread):
         except Exception as e:
             self.report_status(e)
 
+    @staticmethod
+    def extract_latest_samples(buf):
+        """Coalesce backlog per message type without losing velocity to position."""
+        if "\n" not in buf:
+            return [], buf
+        complete, tail = buf.rsplit("\n", 1)
+        latest = {}
+        for line in complete.splitlines():
+            try:
+                sample = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(sample, dict):
+                continue
+            kind = sample.get("type")
+            if kind in ("velocity", "position_local"):
+                # Preserve the order of the retained samples, including invalid
+                # velocity samples: an older valid reading must not replace them.
+                latest.pop(kind, None)
+                latest[kind] = sample
+        return list(latest.values()), tail
+
     def run(self):
         """
         Runs the main routing
@@ -468,10 +623,18 @@ class DvlDriver(threading.Thread):
                 continue
 
             r, _, _ = select([self.socket], [], [], 0)
-            data = None
+            samples = []
             if r:
                 try:
-                    recv = self.socket.recv(1024).decode()
+                    # While disabled, this driver intentionally does not call
+                    # recv(), but the DVL's TCP connection remains open. Linux
+                    # therefore queues received DVL samples in this socket's
+                    # receive buffer until TCP flow control pauses the DVL.
+                    # Read up to one typical full queue (64 KiB) at once, then
+                    # retain only the newest sample of each type. Replaying
+                    # that queued history after re-enable would turn a 10 Hz
+                    # sensor stream into a high-rate MAVLink burst at PX4.
+                    recv = self.socket.recv(65536).decode()
                     connected = True
                     if recv:
                         self.last_recv_time = time.time()
@@ -482,21 +645,20 @@ class DvlDriver(threading.Thread):
                 except Exception as e:
                     logger.warning(f"Error receiving: {e}")
 
-            # Extract 1 complete line from the buffer if available
-            if len(buf) > 0:
-                lines = buf.split("\n", 1)
-                if len(lines) > 1:
-                    buf = lines[1]
-                    data = json.loads(lines[0])
+            samples, buf = self.extract_latest_samples(buf)
 
             if not connected:
                 buf = ""
                 self.report_status("restarting")
-                self.reconnect()
+                # reconnect() returns whether the new TCP socket is usable.
+                # Preserve that result: otherwise this loop immediately tears
+                # down a successful reconnect every 3 ms, creating a rapid
+                # connection storm until a sample happens to arrive first.
+                connected = self.reconnect()
                 time.sleep(0.003)
                 continue
 
-            if not data:
+            if not samples:
                 if time.time() - self.last_recv_time > self.timeout:
                     buf = ""
                     self.report_status("timeout, restarting")
@@ -506,13 +668,11 @@ class DvlDriver(threading.Thread):
 
             self.status = "Running"
 
-            if "type" not in data:
-                continue
-
-            if data["type"] == "velocity":
-                self.handle_velocity(data)
-            elif data["type"] == "position_local":
-                self.handle_position_local(data)
+            for data in samples:
+                if data["type"] == "velocity":
+                    self.handle_velocity(data)
+                elif data["type"] == "position_local":
+                    self.handle_position_local(data)
 
             self.check_temperature()
             time.sleep(0.003)

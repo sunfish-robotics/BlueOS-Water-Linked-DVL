@@ -1,6 +1,6 @@
 import json
 import time
-from math import radians
+from math import isfinite, radians
 from typing import Any, Optional
 
 import requests
@@ -25,6 +25,7 @@ class Mavlink2RestHelper:
         # store vehicle and component to access telemetry data from
         self.vehicle = vehicle
         self.component = component
+        self.sequence = 0
         # store vision template data so we don't need to fetch it multiple times
         self.start_time = time.time()
         self.vision_template = """
@@ -404,7 +405,7 @@ class Mavlink2RestHelper:
             quality=max(1, min(100, int(round(quality)))),
         )
 
-        post(MAVLINK2REST_URL + "/mavlink", data=data)
+        self.post_mavlink(data)
 
     def send_vision_position_estimate(
         self, timestamp, position_estimates, attitude_estimates=(0.0, 0.0, 0.0), reset_counter=0
@@ -422,13 +423,52 @@ class Mavlink2RestHelper:
         )
         logger.info(post(MAVLINK2REST_URL + "/mavlink", data=data))
 
+    def send_dvl_beams(self, sample, q_sensor_to_body=None):
+        """Publish raw diagnostic beams without creating EKF range inputs."""
+        values = [0.0] * 58
+        values[:4] = [-1.0] * 4
+        values[4:8] = [-1.0] * 4
+        for beam in sample.get("transducers", []):
+            beam_id = beam.get("id")
+            if not isinstance(beam_id, int) or isinstance(beam_id, bool) or not 0 <= beam_id < 4:
+                continue
+            distance = beam.get("distance")
+            finite = isinstance(distance, (int, float)) and isfinite(distance)
+            values[beam_id] = float(distance) if finite else -1.0
+            values[4 + beam_id] = float(bool(beam.get("beam_valid"))) if finite else 0.0
+        values[8] = float(bool(sample.get("velocity_valid")))
+        if q_sensor_to_body is not None:
+            values[9] = 1.0  # Version 1 mounting rotation extension
+            values[10:14] = q_sensor_to_body
+        self.post_mavlink(
+            json.dumps(
+                {
+                    "header": {"system_id": 255, "component_id": 0, "sequence": 0},
+                    "message": {
+                        "type": "DEBUG_FLOAT_ARRAY",
+                        "time_usec": int(sample.get("time_of_transmission", 0)),
+                        "name": list("DVL_BEAMS\0"),
+                        "array_id": 48001,
+                        "data": values,
+                    },
+                }
+            )
+        )
+
     def send_rangefinder(self, distance: float):
         "Sends message DISTANCE_SENSOR to flight controller"
         if distance == -1:
             return
         data = self.rangefinder_template.format(int(distance * 100))
 
-        post(MAVLINK2REST_URL + "/mavlink", data=data)
+        self.post_mavlink(data)
+
+    def post_mavlink(self, data: str):
+        """Post an injected MAVLink frame with a monotonically advancing sequence."""
+        message = json.loads(data)
+        message["header"]["sequence"] = self.sequence
+        self.sequence = (self.sequence + 1) % 256
+        return post(MAVLINK2REST_URL + "/mavlink", data=json.dumps(message))
 
     def set_gps_origin(self, lat, lon):
         data = self.gps_origin_template.format(lat=int(float(lat) * 1e7), lon=int(float(lon) * 1e7))

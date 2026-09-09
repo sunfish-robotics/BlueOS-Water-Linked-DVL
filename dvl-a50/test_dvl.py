@@ -46,10 +46,30 @@ class BeamDiagnosticsTest(unittest.TestCase):
     def test_invalid_velocity_still_publishes_beams(self):
         driver = dvl.DvlDriver.__new__(dvl.DvlDriver)
         sent = []
-        driver.mav = types.SimpleNamespace(send_dvl_beams=sent.append)
+        driver.mav = types.SimpleNamespace(send_dvl_beams=lambda sample, rotation: sent.append(sample))
         sample = dict(vx=0, vy=0, vz=0, velocity_valid=False, fom=1, time=200, transducers=[])
         driver.handle_velocity(sample)
         self.assertEqual(sent, [sample])
+
+    def test_mounting_quaternion_matches_velocity_transform(self):
+        for orientation in [dvl.DVL_DOWN, dvl.DVL_DOWN_REVERSED, dvl.DVL_FORWARD]:
+            driver = dvl.DvlDriver.__new__(dvl.DvlDriver)
+            driver.orientation = orientation
+            sent = []
+            helper = dvl.Mavlink2RestHelper.__new__(dvl.Mavlink2RestHelper)
+            helper.post_mavlink = lambda message: sent.append(json.loads(message)["message"])
+            driver.mav = helper
+            driver.handle_velocity(dict(vx=0, vy=0, vz=0, velocity_valid=False, fom=1, time=200))
+            self.assertEqual(sent[0]["data"][9], 1)
+            w, x, y, z = sent[0]["data"][10:14]
+            vector = [1.0, 2.0, 3.0]
+            # Rotate a vector with q v q*, independently of the mounting mapping.
+            cross = [y * vector[2] - z * vector[1], z * vector[0] - x * vector[2], x * vector[1] - y * vector[0]]
+            cross2 = [y * cross[2] - z * cross[1], z * cross[0] - x * cross[2], x * cross[1] - y * cross[0]]
+            rotated = [vector[i] + 2 * (w * cross[i] + cross2[i]) for i in range(3)]
+            expected = driver.transform_velocity(*vector)
+            for actual, target in zip(rotated, expected):
+                self.assertAlmostEqual(actual, target)
 
 
 class StreamBatchTest(unittest.TestCase):

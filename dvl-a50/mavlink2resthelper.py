@@ -423,7 +423,7 @@ class Mavlink2RestHelper:
         )
         logger.info(post(MAVLINK2REST_URL + "/mavlink", data=data))
 
-    def send_dvl_beams(self, sample):
+    def send_dvl_beams(self, sample, q_sensor_to_body=None):
         """Publish raw diagnostic beams without creating EKF range inputs."""
         values = [0.0] * 58
         values[:4] = [-1.0] * 4
@@ -437,6 +437,9 @@ class Mavlink2RestHelper:
             values[beam_id] = float(distance) if finite else -1.0
             values[4 + beam_id] = float(bool(beam.get("beam_valid"))) if finite else 0.0
         values[8] = float(bool(sample.get("velocity_valid")))
+        if q_sensor_to_body is not None:
+            values[9] = 1.0  # Version 1 mounting rotation extension
+            values[10:14] = q_sensor_to_body
         self.post_mavlink(
             json.dumps(
                 {

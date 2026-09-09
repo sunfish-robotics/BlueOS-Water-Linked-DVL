@@ -5,8 +5,9 @@ Driver for the Water Linked DVL A-50
 
 import json
 
-from dvl import DvlDriver
 from flask import Flask
+
+from dvl import DvlDriver
 
 # set the project root directory as the static folder, you can set others.
 app = Flask(__name__, static_url_path="/static", static_folder="static")

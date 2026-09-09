@@ -14,9 +14,10 @@ from select import select
 from statistics import median
 from typing import Any, Deque, Dict, List, Optional
 
+from loguru import logger
+
 from blueoshelper import request
 from dvlfinder import find_the_dvl
-from loguru import logger
 from mavlink2resthelper import GPS_GLOBAL_ORIGIN_ID, Mavlink2RestHelper
 
 HOSTNAME = "waterlinked-dvl.local"
@@ -57,7 +58,6 @@ class MessageType(str, Enum):
 
 # pylint: disable=too-many-instance-attributes
 # pylint: disable=unspecified-encoding
-# pylint: disable=too-many-branches
 # pylint: disable=too-many-statements
 class DvlDriver(threading.Thread):
     """

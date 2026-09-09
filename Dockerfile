@@ -1,6 +1,7 @@
-FROM python:3.9-slim-bullseye
+FROM python:3.9-slim-bookworm
 
-RUN apt update && apt install -y nmap
+RUN apt-get update && apt-get install -y --no-install-recommends nmap \
+    && rm -rf /var/lib/apt/lists/*
 
 # Create default user folder
 RUN mkdir -p /home/pi

@@ -47,7 +47,7 @@ class BeamDiagnosticsTest(unittest.TestCase):
         driver = dvl.DvlDriver.__new__(dvl.DvlDriver)
         sent = []
         driver.mav = types.SimpleNamespace(send_dvl_beams=lambda sample, rotation: sent.append(sample))
-        sample = dict(vx=0, vy=0, vz=0, velocity_valid=False, fom=1, time=200, transducers=[])
+        sample = {"vx": 0, "vy": 0, "vz": 0, "velocity_valid": False, "fom": 1, "time": 200, "transducers": []}
         driver.handle_velocity(sample)
         self.assertEqual(sent, [sample])
 
@@ -57,9 +57,9 @@ class BeamDiagnosticsTest(unittest.TestCase):
             driver.orientation = orientation
             sent = []
             helper = dvl.Mavlink2RestHelper.__new__(dvl.Mavlink2RestHelper)
-            helper.post_mavlink = lambda message: sent.append(json.loads(message)["message"])
+            helper.post_mavlink = lambda message, messages=sent: messages.append(json.loads(message)["message"])
             driver.mav = helper
-            driver.handle_velocity(dict(vx=0, vy=0, vz=0, velocity_valid=False, fom=1, time=200))
+            driver.handle_velocity({"vx": 0, "vy": 0, "vz": 0, "velocity_valid": False, "fom": 1, "time": 200})
             self.assertEqual(sent[0]["data"][9], 1)
             w, x, y, z = sent[0]["data"][10:14]
             vector = [1.0, 2.0, 3.0]

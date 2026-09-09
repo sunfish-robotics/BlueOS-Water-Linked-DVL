@@ -430,7 +430,7 @@ class Mavlink2RestHelper:
         values[4:8] = [-1.0] * 4
         for beam in sample.get("transducers", []):
             beam_id = beam.get("id")
-            if type(beam_id) is not int or not 0 <= beam_id < 4:
+            if not isinstance(beam_id, int) or isinstance(beam_id, bool) or not 0 <= beam_id < 4:
                 continue
             distance = beam.get("distance")
             finite = isinstance(distance, (int, float)) and isfinite(distance)

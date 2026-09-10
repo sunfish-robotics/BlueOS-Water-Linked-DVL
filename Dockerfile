@@ -1,4 +1,5 @@
-FROM python:3.9-slim-bookworm
+ARG BASE_IMAGE=python:3.9-slim-bookworm
+FROM ${BASE_IMAGE}
 
 RUN apt-get update && apt-get install -y --no-install-recommends nmap \
     && rm -rf /var/lib/apt/lists/*

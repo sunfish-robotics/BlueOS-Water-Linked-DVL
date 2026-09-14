@@ -44,7 +44,7 @@ class BeamDiagnosticsTest(unittest.TestCase):
         self.assertEqual(message["array_id"], 48001)
 
     def test_invalid_velocity_still_publishes_beams(self):
-        driver = dvl.DvlDriver.__new__(dvl.DvlDriver)
+        driver = dvl.DvlDriver()
         sent = []
         driver.mav = types.SimpleNamespace(send_dvl_beams=lambda sample, rotation: sent.append(sample))
         sample = {"vx": 0, "vy": 0, "vz": 0, "velocity_valid": False, "fom": 1, "time": 200, "transducers": []}
@@ -53,7 +53,7 @@ class BeamDiagnosticsTest(unittest.TestCase):
 
     def test_mounting_quaternion_matches_velocity_transform(self):
         for orientation in [dvl.DVL_DOWN, dvl.DVL_DOWN_REVERSED, dvl.DVL_FORWARD]:
-            driver = dvl.DvlDriver.__new__(dvl.DvlDriver)
+            driver = dvl.DvlDriver()
             driver.orientation = orientation
             sent = []
             helper = dvl.Mavlink2RestHelper.__new__(dvl.Mavlink2RestHelper)
@@ -207,7 +207,7 @@ class RangefinderDistanceTest(unittest.TestCase):
         self.assertIsNone(driver.filtered_rangefinder_distance(frame(2.0), timestamp_s=0.2))
         self.assertAlmostEqual(driver.filtered_rangefinder_distance(frame(2.0), timestamp_s=0.4), 2.0 * cosine)
         self.assertAlmostEqual(driver.filtered_rangefinder_distance(frame(20.0), timestamp_s=0.6), 2.0 * cosine)
-        self.assertAlmostEqual(driver.filtered_rangefinder_distance(frame(20.0), timestamp_s=0.8), 3.0 * cosine)
+        self.assertAlmostEqual(driver.filtered_rangefinder_distance(frame(20.0), timestamp_s=0.8), 2.0 * cosine)
 
     def test_rangefinder_rejects_stale_or_out_of_order_frames(self):
         driver = dvl.DvlDriver()

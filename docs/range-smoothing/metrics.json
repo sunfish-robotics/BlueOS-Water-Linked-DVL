@@ -1,0 +1,27 @@
+{
+  "baseline": "20923bcb734e9957ff030bb9783e16757fe563ec",
+  "synthetic_10hz": {
+    "selected_step_s": 4.1,
+    "first_response_s": 4.6,
+    "acceptance_delay_s": 0.5,
+    "response_63_s": 5.5,
+    "response_95_s": 7.5,
+    "shallower_output_s": 9.1,
+    "ramp_final_selected_m": 5.120000000000001,
+    "ramp_final_proposed_m": 2.0950904103976113
+  },
+  "recording": {
+    "path": "/Users/david-sunfish/Downloads/flight-20260910T090544Z-1789031144087079452/telemetry/00010.mcap",
+    "frames": 348,
+    "duration_s": 71.68232798576355,
+    "non_increasing_skipped": 0,
+    "original_no_output": 3,
+    "proposed_no_output": 11,
+    "max_selected_minus_proposed_m": 0.23983927677599293,
+    "max_step_original_m": 0.20713380070469634,
+    "max_step_proposed_m": 0.2049984882023852,
+    "max_increase_original_m": 0.19623219561764293,
+    "max_increase_proposed_m": 0.04715554911204389,
+    "gaps_over_400ms": 3
+  }
+}

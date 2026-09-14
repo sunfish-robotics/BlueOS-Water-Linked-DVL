@@ -19,6 +19,7 @@ from loguru import logger
 from blueoshelper import request
 from dvlfinder import find_the_dvl
 from mavlink2resthelper import GPS_GLOBAL_ORIGIN_ID, Mavlink2RestHelper
+from range_filter import RANGE_CONTINUITY_GAP_S, RangePersistenceFilter
 
 HOSTNAME = "waterlinked-dvl.local"
 DVL_DOWN = 1
@@ -40,9 +41,10 @@ LATLON_TO_CM = 1.1131884502145034e5
 # The A50 can publish velocity samples far faster than PX4 needs.  Sending one
 # MAVLink message for every received sample lets a temporary TCP backlog turn
 # into a large UDP burst at the autopilot.  Bound each output independently:
-# PX4 needs the DVL velocity at 10 Hz, while 5 Hz is sufficient for altitude.
+# Keep range headroom above the DVL's 2-15 Hz reports: a 5 Hz cap can skip
+# alternate reports and exceed PX4's 400 ms UUV range-fusion timeout.
 ODOMETRY_PERIOD_S = 0.1
-RANGEFINDER_PERIOD_S = 0.2
+RANGEFINDER_PERIOD_S = 0.05
 
 
 class MessageType(str, Enum):
@@ -106,6 +108,8 @@ class DvlDriver(threading.Thread):
         self.last_rangefinder_source_timestamp_s = float("-inf")
         self.rangefinder_beam_timestamps_s: Dict[int, float] = {}
         self.rangefinder_beam_histories: Dict[int, Deque[float]] = {}
+        self.rangefinder_filter = RangePersistenceFilter()
+        self.rangefinder_filter_timestamp_s = float("-inf")
 
     def report_status(self, msg: str) -> None:
         self.status = msg
@@ -213,6 +217,8 @@ class DvlDriver(threading.Thread):
         Sets the DVL mounting orientation.
         """
         if orientation in [DVL_DOWN, DVL_FORWARD, DVL_DOWN_REVERSED]:
+            if orientation != self.orientation:
+                self.reset_rangefinder_filter()
             self.orientation = orientation
             self.save_settings()
             return True
@@ -332,11 +338,17 @@ class DvlDriver(threading.Thread):
 
         if source != self.rangefinder_distance_source:
             self.last_rangefinder_source_timestamp_s = float("-inf")
-            self.rangefinder_beam_timestamps_s.clear()
-            self.rangefinder_beam_histories.clear()
+            self.reset_rangefinder_filter()
         self.rangefinder_distance_source = source
         self.save_settings()
         return True
+
+    def reset_rangefinder_filter(self) -> None:
+        """Require new beam histories and estimate after invalid input/source change."""
+        self.rangefinder_beam_timestamps_s.clear()
+        self.rangefinder_beam_histories.clear()
+        self.rangefinder_filter.reset()
+        self.rangefinder_filter_timestamp_s = float("-inf")
 
     @staticmethod
     def rangefinder_distance(data: Dict[str, Any], source: str) -> Optional[float]:
@@ -358,24 +370,41 @@ class DvlDriver(threading.Thread):
     def rangefinder_frame_is_fresh(self, data: Dict[str, Any], wall_time_s: float) -> bool:
         """Reject delayed, future-dated, and out-of-order DVL range samples."""
         timestamp_us = data.get("time_of_transmission")
-        if not isinstance(timestamp_us, (int, float)) or timestamp_us <= 0:
+        if not isinstance(timestamp_us, (int, float)) or not math.isfinite(timestamp_us) or timestamp_us <= 0:
             logger.warning("DVL range sample has no usable transmission timestamp, ignoring it.")
+            self.reset_rangefinder_filter()
             return False
 
         timestamp_s = timestamp_us / 1e6
         if abs(wall_time_s - timestamp_s) > DVL_MAX_RANGEFINDER_SAMPLE_AGE_S:
             logger.warning("DVL range sample is not current, ignoring it.")
+            self.reset_rangefinder_filter()
             return False
         if timestamp_s <= self.last_rangefinder_source_timestamp_s:
             logger.warning("DVL range sample timestamp is out of order, ignoring it.")
+            self.reset_rangefinder_filter()
+            # Rebase after rewind so a restarted sensor can recover on its next frame.
+            self.last_rangefinder_source_timestamp_s = timestamp_s
             return False
 
         self.last_rangefinder_source_timestamp_s = timestamp_s
         return True
 
     def filtered_rangefinder_distance(self, data: Dict[str, Any], timestamp_s: float) -> Optional[float]:
-        """Median-filter each beam independently, then return the conservative lower median."""
+        """Apply persistence after the unchanged per-beam median/second-smallest selection."""
+        if not math.isfinite(timestamp_s) or timestamp_s <= self.rangefinder_filter_timestamp_s:
+            self.reset_rangefinder_filter()
+            return None
+        if timestamp_s - self.rangefinder_filter_timestamp_s > RANGE_CONTINUITY_GAP_S:
+            self.reset_rangefinder_filter()
+        self.rangefinder_filter_timestamp_s = timestamp_s
+        selected = self.selected_rangefinder_distance(data, timestamp_s)
+        return self.rangefinder_filter.update(selected, timestamp_s)
+
+    def selected_rangefinder_distance(self, data: Dict[str, Any], timestamp_s: float) -> Optional[float]:
+        """Original per-beam selection, exposed separately for replay comparison."""
         filtered_beams = []
+        seen = set()
         for beam in data.get("transducers", []):
             beam_id = beam.get("id")
             distance = beam.get("distance")
@@ -383,10 +412,13 @@ class DvlDriver(threading.Thread):
                 isinstance(beam_id, int)
                 and beam.get("beam_valid")
                 and isinstance(distance, (int, float))
+                and math.isfinite(distance)
                 and distance > 0
+                and beam_id not in seen
             ):
                 continue
 
+            seen.add(beam_id)
             history = self.rangefinder_beam_histories.setdefault(
                 beam_id,
                 deque(maxlen=RANGEFINDER_BEAM_FILTER_WINDOW_SAMPLES),
@@ -400,6 +432,10 @@ class DvlDriver(threading.Thread):
             if len(history) == RANGEFINDER_BEAM_FILTER_WINDOW_SAMPLES:
                 filtered_beams.append(median(history))
 
+        # Missing/invalid beams must mature again on recovery.
+        for beam_id in set(self.rangefinder_beam_histories) - seen:
+            del self.rangefinder_beam_histories[beam_id]
+            self.rangefinder_beam_timestamps_s.pop(beam_id, None)
         if len(filtered_beams) < DVL_MIN_USABLE_BEAMS:
             return None
         return sorted(filtered_beams)[1]
@@ -450,6 +486,8 @@ class DvlDriver(threading.Thread):
         """
         Sets up the socket to talk to the DVL
         """
+        self.reset_rangefinder_filter()
+        self.last_rangefinder_source_timestamp_s = float("-inf")
         while timeout > 0:
             try:
                 self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -505,6 +543,7 @@ class DvlDriver(threading.Thread):
         # confidence = 100 if valid else 0
 
         if not valid:
+            self.reset_rangefinder_filter()
             logger.info("Invalid  dvl reading, ignoring it.")
             return
 

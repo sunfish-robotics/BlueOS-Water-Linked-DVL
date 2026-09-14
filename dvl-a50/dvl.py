@@ -41,9 +41,10 @@ LATLON_TO_CM = 1.1131884502145034e5
 # The A50 can publish velocity samples far faster than PX4 needs.  Sending one
 # MAVLink message for every received sample lets a temporary TCP backlog turn
 # into a large UDP burst at the autopilot.  Bound each output independently:
-# PX4 needs the DVL velocity at 10 Hz, while 5 Hz is sufficient for altitude.
+# Keep range headroom above the DVL's 2-15 Hz reports: a 5 Hz cap can skip
+# alternate reports and exceed PX4's 400 ms UUV range-fusion timeout.
 ODOMETRY_PERIOD_S = 0.1
-RANGEFINDER_PERIOD_S = 0.2
+RANGEFINDER_PERIOD_S = 0.05
 
 
 class MessageType(str, Enum):

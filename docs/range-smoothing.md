@@ -69,7 +69,7 @@ large shallow outliers are not corrected by symmetric small-error smoothing.
   clear histories and filter state. A new connection also clears the source
   timestamp guard. The reported-altitude bypass retains its existing behavior.
 - There is no timer callback or publication on missing input. The driver emits
-  at most once per fresh valid input, still limited by the existing 0.2 s send
+  at most once per fresh valid input, limited by a 0.05 s send
   interval. Invalid input never republishes the last accepted value. A fresh
   deeper candidate can intentionally publish the held estimate.
 
@@ -171,7 +171,9 @@ the observation is held, so fusion may be overconfident in delayed/correlated
 information. Suppressing all output for the 0.5 s persistence period instead
 would exceed the 400 ms window if there were no successful intervening fusion;
 that is why this implementation continues to emit on valid candidate input.
-At 5 Hz, scheduling jitter or packet loss can also threaten the 400 ms margin.
+The former 5 Hz publication cap let scheduling jitter or packet loss threaten
+the 400 ms margin. The range cap is now 20 Hz, above the documented 2-15 Hz
+sensor report rate, so normal reports are not discarded by the send limiter.
 
 **This is a candidate filter, not validated for unrestricted navigation.** It
 cannot distinguish a beam switching to deeper bottom from a genuine drop-off or
@@ -201,3 +203,58 @@ use synchronized range, vertical velocity/depth, fusion flags, terrain validity,
 and navigation targets over known slopes and vertical maneuvers to decide whether
 measurement filtering belongs in this path at all. The provisional defaults are
 not established by screenshots or by this replay alone.
+
+## September 11 publication-rate fix
+
+The first fix changes only `RANGEFINDER_PERIOD_S` from 0.2 to 0.05 seconds.
+Odometry remains capped at 10 Hz. Beam selection, persistence, freshness checks,
+invalid-velocity suppression, and three-sample recovery remain unchanged.
+
+The [A50/A125 protocol](https://docs.waterlinked.com/dvl/dvl-json-protocol/)
+ties valid reported altitude and velocity to `velocity_valid`. It lists
+`beam_valid` but does not explicitly guarantee independent range validity when
+the overall velocity solution is invalid. Removing that gate requires further
+vendor evidence; four true beam flags alone are insufficient justification.
+
+Replay through both actual `handle_velocity` implementations used baseline
+`e0280f754bc54f582fa00efd2704200ce9adfda7` and 2,505 recorded beam frames over
+286.988 seconds from September 11's `00003.mcap`:
+
+| Metric | Baseline | 20 Hz cap |
+| --- | ---: | ---: |
+| Simulated range publications | 1,111 | 2,242 |
+| Publication gaps over 400 ms | 64 | 50 |
+| Time beyond 400 ms since publication | 20.613 s | 16.757 s |
+| Longest publication gap | 2.125 s | 2.125 s |
+
+These are simulated publication gaps, not predicted mission-warning counts.
+PX4 beam receipt timestamps approximate bridge ingress; missing recorded frames,
+HTTP/MAVLink delays, and EKF fusion are not simulated. Initial filter warm-up is
+excluded from the stale-time metric. The change reduces rate-limit-induced gaps
+but does not fix invalid-velocity outages or prove live improvement.
+
+```sh
+uv run --no-project --with mcap --with mcap-ros2-support --with loguru \
+  --with python3-nmap --with requests python dvl-a50/replay_range_publication.py \
+  /path/to/00003.mcap --duration 287 --output /tmp/publication-metrics.json
+```
+
+All 36 unit tests passed on host Python and Python 3.9. New publication tests
+cover 5/9/10/15 Hz with jitter, burst limiting, invalid velocity, insufficient or
+nonfinite beams, stale/future/duplicate frames, outage recovery and disabled
+output. No firmware timeout or innovation gate was changed.
+
+Deployed September 11 to `10.9.4.3` through Kraken as
+`sunfishrobotics.water-linked-dvl:range-rate-20260911-armv7`. The ARMv7 image
+passed all 36 tests with networking disabled before installation. Archive SHA256:
+`31851f4e816135a7274e496621ed340e9dcbefef9cf1c6728369d99601b85765`.
+The running container has `RANGEFINDER_PERIOD_S = 0.05`, zero restarts, and the
+existing `/root/.config` bind. DVL host `10.9.4.12`, reversed-down orientation,
+`beam_median`, enabled rangefinder, and ODOMETRY settings were preserved.
+
+Post-install `/get_status` reported Running. Over approximately 15 seconds the
+PX4 DDS gateway received 104 new distance-sensor messages (6.91 Hz) and 128 beam
+messages (8.51 Hz), with zero decode errors. Invalid DVL velocity still occurred
+in extension logs. This proves updated range flow through PX4 to the gateway,
+not elimination of mission warnings. A direct PX4 shell read failed with EOF;
+no mission or vehicle motion was commanded during verification.

@@ -12,8 +12,9 @@ import types
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-import dvl
 from mcap_ros2.reader import read_ros2_messages
+
+import dvl
 
 BASELINE = "e0280f7"
 ROOT = Path(__file__).resolve().parents[1]
